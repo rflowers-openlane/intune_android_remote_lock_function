@@ -1,0 +1,15 @@
+{
+  "name": "intune-device-restart-function",
+  "version": "1.0.0",
+  "description": "Azure Function HTTP endpoint for restarting Intune Windows devices by primary user.",
+  "main": "src/{index.js,functions/*.js}",
+  "scripts": {
+    "start": "func start",
+    "check": "node --check src/index.js && node --check src/functions/restartDevicesForPrimaryUser.js && node --check src/lib/intuneRestartService.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.11.0"
+  },
+  "devDependencies": {}
+}
