@@ -101,8 +101,3 @@ Write-Host 'Provisioning complete.'
 Write-Host "Function App: $FunctionAppName"
 Write-Host "Resource group: $ResourceGroupName"
 Write-Host "Storage account: $StorageAccountName"
-Write-Host ''
-Write-Host 'Next steps:'
-Write-Host '1. Publish the function code with scripts/publish-function.ps1.'
-Write-Host '2. Assign Graph app roles with scripts/grant-graph-app-roles.ps1.'
-Write-Host '3. Configure Okta to call the Function URL with a Function key.'

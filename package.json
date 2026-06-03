@@ -1,11 +1,11 @@
 {
-  "name": "intune-device-restart-function",
+  "name": "intune-android-remote-lock-function",
   "version": "1.0.0",
-  "description": "Azure Function HTTP endpoint for restarting Intune Windows devices by primary user.",
+  "description": "Azure Function HTTP endpoint for remotely locking corporate-owned Android Intune devices by assigned user.",
   "main": "src/{index.js,functions/*.js}",
   "scripts": {
     "start": "func start",
-    "check": "node --check src/index.js && node --check src/functions/restartDevicesForPrimaryUser.js && node --check src/lib/intuneRestartService.js",
+    "check": "node --check src/index.js && node --check src/functions/remoteLockAndroidDevicesForUser.js && node --check src/lib/androidRemoteLockService.js",
     "test": "node --test"
   },
   "dependencies": {

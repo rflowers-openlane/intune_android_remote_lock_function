@@ -1,50 +1,26 @@
-# Intune Device Restart Function
+# Intune Android Remote Lock Function
 
-This project is an HTTP-triggered Azure Function intended to be called by Okta Workflows.
+This project is a separate HTTP-triggered Azure Function intended to be called by Okta Workflows.
 
 Its job is:
 
 1. Receive a target user from Okta.
 2. Resolve that user in Microsoft Graph.
 3. Retrieve Intune managed devices associated with that user.
-4. Filter those devices to Windows.
-5. Return the matching device list.
-6. Restart those devices only when the request explicitly sets `dryRun` to `false`.
+4. Filter those devices to Android.
+5. Split matching Android devices into eligible company-owned devices and skipped non-company-owned devices.
+6. Return the matching device list.
+7. In live mode, run `resetPasscode`, optionally run `syncDevice`, and then run `remoteLock` for eligible company-owned Android devices.
 
-The Function is designed so no Microsoft Graph username, password, client secret, or certificate is stored in the script. In Azure, it uses the Function App's system-assigned managed identity to request a Microsoft Graph access token.
+The Function uses the Azure Function App's managed identity. It does not store Microsoft Graph credentials in code or in Okta.
 
-## What Has Been Built
+## Important Android Notes
 
-Project folder:
+`remoteLock` locks the device screen, but the user can unlock it with the existing PIN/passcode. It is useful as a no-wipe remote action, but it is not a full device lockdown by itself.
 
-```text
-intune-device-restart-function/
-```
+`resetPasscode` defaults to `true`. Microsoft documents different Android reset behavior by enrollment type. Some Android Enterprise enrollment types reset only the work profile passcode, not the full device PIN. Test against your real enrollment model before using it broadly.
 
-Important files:
-
-```text
-.funcignore
-host.json
-package.json
-local.settings.sample.json
-scripts/new-function-app.ps1
-scripts/publish-function.ps1
-src/functions/restartDevicesForPrimaryUser.js
-src/lib/intuneRestartService.js
-scripts/grant-graph-app-roles.ps1
-tests/intuneRestartService.test.js
-```
-
-`src/functions/restartDevicesForPrimaryUser.js` contains the Azure Function endpoint.
-
-`src/lib/intuneRestartService.js` contains the Microsoft Graph and Intune workflow logic.
-
-`scripts/grant-graph-app-roles.ps1` is a setup helper for an Entra admin. It enables the Function App's system-assigned managed identity and assigns the Microsoft Graph application permissions needed by the Function.
-
-`tests/intuneRestartService.test.js` uses mocked Microsoft Graph and managed identity responses. It does not call Azure, Graph, Intune, or Okta.
-
-Nothing in this project has been deployed or executed against Intune.
+This Function never wipes, retires, deletes, or removes enrollment from a device.
 
 ## Endpoint
 
@@ -57,7 +33,7 @@ POST
 Route:
 
 ```text
-/api/restartDevicesForPrimaryUser
+/api/remoteLockAndroidDevicesForUser
 ```
 
 Authentication level:
@@ -66,46 +42,48 @@ Authentication level:
 function
 ```
 
-This means callers need a valid Azure Functions host/function key unless the Function App authentication model is changed later.
+External callers need the Azure Function URL with the `code=` function key.
 
 ## Request Body
 
-`POST /api/restartDevicesForPrimaryUser`
+Dry-run example:
 
 ```json
 {
   "userPrincipalName": "person@example.com",
-  "dryRun": true
+  "dryRun": true,
+  "resetPasscode": true
 }
 ```
 
-You can pass either `userPrincipalName` or `userId`.
-
-Examples:
-
-```json
-{
-  "userPrincipalName": "person@example.com",
-  "dryRun": true
-}
-```
-
-```json
-{
-  "userId": "00000000-0000-0000-0000-000000000000",
-  "dryRun": false
-}
-```
+You can also pass `userId` instead of `userPrincipalName`.
 
 `dryRun` defaults to `true`.
 
-The Function sends Intune restart commands only when:
+`resetPasscode` defaults to `true`.
+
+`syncDevice` defaults to `true`.
+
+Live default reset passcode, sync, and remote lock:
 
 ```json
 {
+  "userPrincipalName": "person@example.com",
   "dryRun": false
 }
 ```
+
+Live remote lock only, skipping passcode reset:
+
+```json
+{
+  "userPrincipalName": "person@example.com",
+  "dryRun": false,
+  "resetPasscode": false
+}
+```
+
+If the target user exists but has no Intune managed devices associated with the user account, the Function returns `200 OK` with `matchedDeviceCount: 0`, `eligibleDeviceCount: 0`, `skippedDeviceCount: 0`, `devices: []`, `eligibleDevices: []`, `skippedDevices: []`, and `actionResults: []`.
 
 ## Optional Shared Secret
 
@@ -115,7 +93,7 @@ If `OKTA_SHARED_SECRET` is configured as an app setting, callers must include:
 x-okta-shared-secret: <secret value>
 ```
 
-This is an extra guardrail on top of the Azure Functions key. If `OKTA_SHARED_SECRET` is not configured, the Function skips this check.
+This is an extra guardrail on top of the Azure Function key.
 
 ## Response
 
@@ -125,50 +103,83 @@ Dry-run response shape:
 {
   "correlationId": "generated-request-id",
   "dryRun": true,
+  "resetPasscode": true,
+  "syncDevice": true,
   "user": {
     "id": "user-object-id",
     "userPrincipalName": "person@example.com",
     "displayName": "Person Name"
   },
-  "matchedDeviceCount": 1,
-  "devices": [
-    {
-      "id": "intune-managed-device-id",
-      "deviceName": "WINDOWS-DEVICE-01",
-      "operatingSystem": "Windows",
-      "managementState": "managed",
-      "managedDeviceOwnerType": "company",
-      "enrolledUserPrincipalName": "person@example.com",
-      "azureADDeviceId": "entra-device-id",
-      "serialNumber": "serial-number",
-      "lastSyncDateTime": "2026-05-26T00:00:00Z"
-    }
-  ],
-  "restartResults": []
+  "matchedDeviceCount": 2,
+  "eligibleDeviceCount": 1,
+  "skippedDeviceCount": 1,
+  "devices": [],
+  "eligibleDevices": [],
+  "skippedDevices": [],
+  "actionResults": []
 }
 ```
 
-Live restart response shape:
+Live response shape:
 
 ```json
 {
   "correlationId": "generated-request-id",
   "dryRun": false,
+  "resetPasscode": true,
+  "syncDevice": true,
   "matchedDeviceCount": 1,
-  "devices": [
+  "eligibleDeviceCount": 1,
+  "skippedDeviceCount": 0,
+  "actionResults": [
     {
       "id": "intune-managed-device-id",
-      "deviceName": "WINDOWS-DEVICE-01"
-    }
-  ],
-  "restartResults": [
-    {
-      "id": "intune-managed-device-id",
-      "deviceName": "WINDOWS-DEVICE-01",
-      "status": 204,
-      "ok": true
+      "deviceName": "ANDROID-CORP-01",
+      "actions": [
+        {
+          "action": "resetPasscode",
+          "ok": true,
+          "status": 204,
+          "actionState": "done",
+          "passcode": "generated-passcode-from-intune",
+          "errorCode": 0,
+          "lastUpdatedDateTime": "2026-05-29T14:54:21Z"
+        },
+        {
+          "action": "syncDevice",
+          "ok": true,
+          "status": 204
+        },
+        {
+          "action": "remoteLock",
+          "ok": true,
+          "status": 204
+        }
+      ]
     }
   ]
+}
+```
+
+## Safety Behavior
+
+The Function will not send remote actions when:
+
+- The request omits both `userPrincipalName` and `userId`.
+- The shared secret is configured and the caller does not provide the matching header.
+- The target user cannot be resolved in Microsoft Graph.
+- No matching Android Intune devices are found.
+- No matching Android devices are company-owned.
+- `dryRun` is omitted or set to `true`.
+- The eligible device count exceeds `maxDeviceCount`.
+
+Non-company-owned Android devices are returned in `skippedDevices` and are never sent remote actions.
+
+`maxDeviceCount` defaults to `10`. Override it in the request if needed:
+
+```json
+{
+  "maxDeviceCount": 25
 }
 ```
 
@@ -180,8 +191,6 @@ Enable a system-assigned managed identity on the Function App and grant these Mi
 - `DeviceManagementManagedDevices.Read.All`
 - `DeviceManagementManagedDevices.PrivilegedOperations.All`
 
-The Function does not store Graph credentials. It gets a Microsoft Graph token from the Azure Functions managed identity endpoint at runtime.
-
 After the Function App exists, an Entra admin can assign the required Microsoft Graph application roles with:
 
 ```powershell
@@ -190,171 +199,139 @@ After the Function App exists, an Entra admin can assign the required Microsoft 
   -FunctionAppName '<function-app-name>'
 ```
 
-That script performs these actions:
-
-1. Enables system-assigned managed identity on the Function App.
-2. Resolves the Microsoft Graph service principal.
-3. Finds the Graph application roles listed above.
-4. Assigns those roles to the Function App managed identity.
-
-The script requires an Azure CLI session signed in as an account with enough Entra privileges to assign Microsoft Graph application permissions.
-
 ## Graph Calls Used
-
-The Function uses the managed identity token to call Microsoft Graph:
 
 Resolve the user:
 
 ```text
-GET /users/{userPrincipalName-or-userId}?$select=id,userPrincipalName,displayName
+GET https://graph.microsoft.com/v1.0/users/{userPrincipalName-or-userId}?$select=id,userPrincipalName,displayName
 ```
 
-List Intune managed devices associated with the user:
+List devices associated with the user:
 
 ```text
-GET /users/{userId}/managedDevices?$select=...
+GET https://graph.microsoft.com/v1.0/users/{userId}/managedDevices?$select=...
 ```
 
-Restart a device:
+Passcode reset:
 
 ```text
-POST /deviceManagement/managedDevices/{managedDeviceId}/rebootNow
+POST https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{managedDeviceId}/resetPasscode
 ```
 
-The Function filters the returned devices to `operatingSystem` equal to `Windows` and follows `@odata.nextLink` when Graph returns paged managed device results.
+Retrieve the reset action result, including the generated passcode when available:
 
-## Deployment Notes
+```text
+GET https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{managedDeviceId}?$select=id,deviceActionResults
+```
 
-Recommended security posture:
+The Function polls `deviceActionResults` after `resetPasscode` and returns the generated passcode in `actionResults`. Treat this value as sensitive and store it only in a restricted ticket, secure Okta table, or other approved legal-hold record.
 
-- Keep the HTTP trigger `authLevel` set to `function`.
-- Store the Function key in Okta Workflow connection/configuration.
-- Store `OKTA_SHARED_SECRET` as an Azure Function App setting or remove that app setting if you want to rely only on Function key auth.
-- Restrict inbound network access where possible, or place the Function behind API Management if you need stricter Okta token validation.
+Optional device sync:
 
-Provision a new Azure Function App later with:
+```text
+POST https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{managedDeviceId}/syncDevice
+```
+
+Remote lock:
+
+```text
+POST https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{managedDeviceId}/remoteLock
+```
+
+## Local Validation
+
+Run syntax checks:
 
 ```powershell
-.\scripts\new-function-app.ps1 `
-  -ResourceGroupName '<resource-group>' `
-  -Location '<azure-region>' `
-  -FunctionAppName '<function-app-name>' `
-  -OktaSharedSecret '<optional-shared-secret>'
+npm run check
 ```
 
-That script creates:
-
-- Resource group.
-- Storage account.
-- Application Insights component.
-- Linux Azure Function App on the consumption plan.
-- System-assigned managed identity.
-- Required Function App settings.
-
-Publish code later with:
+Run mocked tests:
 
 ```powershell
-.\scripts\publish-function.ps1 -FunctionAppName '<function-app-name>'
+npm test
 ```
 
-Then assign Microsoft Graph app roles:
+The mocked tests do not call Azure, Microsoft Graph, Intune, or Okta.
 
-```powershell
-.\scripts\grant-graph-app-roles.ps1 `
-  -ResourceGroupName '<resource-group>' `
-  -FunctionAppName '<function-app-name>'
-```
+## Azure Portal Build Steps
 
-## Okta Workflow Shape
+1. Create a new private GitHub repo or branch for this folder.
+2. Push the contents of `intune-android-remote-lock-function`.
+3. In Azure Portal, create a new Function App:
+   - Hosting: Flex Consumption if available.
+   - Runtime: Node.js.
+   - Version: 22 or 20.
+   - OS: Linux.
+   - Monitoring: Application Insights enabled.
+4. Turn on system-assigned managed identity:
+   - Function App > Identity > System assigned > On > Save.
+5. Add app setting:
+   - `OKTA_SHARED_SECRET = <long random value>`
+6. Use Deployment Center to connect the Function App to the GitHub repo/branch.
+7. Wait for deployment success.
+8. Run `scripts/grant-graph-app-roles.ps1` in Azure Cloud Shell PowerShell.
+9. Restart the Function App.
+10. Test in Azure with `dryRun: true`.
 
-Recommended Okta inputs:
+## Azure Test/Run Body
 
-```text
-userPrincipalName
-dryRun
-```
-
-Recommended Okta HTTP action:
-
-```text
-POST https://<function-app-name>.azurewebsites.net/api/restartDevicesForPrimaryUser?code=<function-key>
+```json
+{
+  "userPrincipalName": "person@example.com",
+  "dryRun": true,
+  "resetPasscode": true
+}
 ```
 
 Headers:
 
 ```text
 Content-Type: application/json
-x-okta-shared-secret: <optional-shared-secret>
+x-okta-shared-secret: <secret value>
 ```
 
-Body:
+Leave query parameters empty in Azure Portal Test/Run.
+
+## First Live Test Body
+
+Default live mode resets passcode, syncs, then remote locks:
+
+```json
+{
+  "userPrincipalName": "person@example.com",
+  "dryRun": false
+}
+```
+
+To skip passcode reset deliberately:
+
+```json
+{
+  "userPrincipalName": "person@example.com",
+  "dryRun": false,
+  "resetPasscode": false
+}
+```
+
+## Okta Workflow Body
+
+Start with dry run:
 
 ```json
 {
   "userPrincipalName": "{{user.email}}",
-  "dryRun": true
+  "dryRun": true,
+  "resetPasscode": true
 }
 ```
 
-Start with `dryRun: true`. Change to `dryRun: false` only after the returned device list has been validated.
+After validating the returned device list, switch to live mode:
 
-## Safety Behavior
-
-The Function will not restart anything when:
-
-- The request omits both `userPrincipalName` and `userId`.
-- The shared secret is configured and the caller does not provide the matching header.
-- The target user cannot be resolved in Microsoft Graph.
-- No matching Windows Intune devices are found.
-- `dryRun` is omitted or set to `true`.
-
-The Function only targets Intune managed devices with:
-
-```text
-operatingSystem eq 'Windows'
+```json
+{
+  "userPrincipalName": "{{user.email}}",
+  "dryRun": false
+}
 ```
-
-It does not restart macOS, iOS, Android, or other non-Windows devices.
-
-## Local Development
-
-Install dependencies:
-
-```powershell
-npm install
-```
-
-Create `local.settings.json` from `local.settings.sample.json`, then run:
-
-```powershell
-func start
-```
-
-Local runs cannot use the Azure Functions managed identity endpoint unless hosted in Azure.
-
-## Current Status
-
-This repository currently contains the draft Function project and setup documentation only.
-
-Completed locally:
-
-- Project files created.
-- Function source created.
-- Graph/Intune workflow logic separated into a testable library.
-- Managed identity permission helper created.
-- Provisioning helper created.
-- Publish helper created.
-- Unit tests created with mocked Graph and managed identity responses.
-- JavaScript syntax check completed.
-- PowerShell helper parse check completed.
-- Unit tests completed.
-
-Not done yet:
-
-- No `npm install`.
-- No local Function host run.
-- No Azure deployment.
-- No Graph permissions assigned.
-- No Okta Workflow configured.
-- No Intune devices queried.
-- No restart command sent.
